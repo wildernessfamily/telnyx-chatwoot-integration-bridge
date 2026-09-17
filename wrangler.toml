@@ -1,0 +1,19 @@
+########################################################
+# Copyright (c) 2026 David Swanson https://david.zone
+# This software is licensed under CC BY-NC-SA 4.0
+# http://creativecommons.org/licenses/by-nc-sa/4.0/
+########################################################
+name = "telnyx-chatwoot-bridge"
+main = "src/worker.js"
+compatibility_date = "2024-01-01"
+
+# Environment Variables (Non-sensitive defaults / placeholders)
+[vars]
+CHATWOOT_BASE_URL = "https://chatwoot.yourdomain.com"
+CHATWOOT_ACCOUNT_ID = "1"
+CHATWOOT_INBOX_ID = "1"
+TELNYX_PHONE_NUMBER = "+18005550199"
+
+# Note: Sensitive keys (TELNYX_API_KEY, CHATWOOT_API_TOKEN) should be set via:
+# npx wrangler secret put TELNYX_API_KEY
+# npx wrangler secret put CHATWOOT_API_TOKEN

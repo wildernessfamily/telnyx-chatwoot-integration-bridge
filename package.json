@@ -1,0 +1,25 @@
+{
+  "name": "telnyx-chatwoot-integration-bridge",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight two-way SMS/MMS bridge connecting Telnyx to Chatwoot API Channel via Cloudflare Workers",
+  "main": "src/worker.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "keywords": [
+    "chatwoot",
+    "telnyx",
+    "cloudflare-workers",
+    "sms",
+    "mms",
+    "telecom",
+    "serverless"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
