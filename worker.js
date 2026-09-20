@@ -27,7 +27,6 @@ async function handleRequest(request) {
       const body = await request.json();
       const eventType = body?.data?.event_type;
 
-      // Ignore delivery receipts or non-message events
       if (eventType !== 'message.received') {
         return new Response('Event ignored', { status: 200 });
       }
@@ -46,17 +45,24 @@ async function handleRequest(request) {
         'Content-Type': 'application/json',
       };
 
-      // 1. Search or create contact in Chatwoot
+      // 1. Find or create contact
       let contactId = null;
+      console.log("Searching contact for:", senderPhone);
       const searchRes = await fetch(
         `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/search?q=${encodeURIComponent(senderPhone)}`,
         { headers }
       );
-      const searchData = await searchRes.json();
+      
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        if (searchData?.payload?.length > 0) {
+          contactId = searchData.payload[0].id;
+          console.log("Found existing contact ID:", contactId);
+        }
+      }
 
-      if (searchData?.payload?.length > 0) {
-        contactId = searchData.payload[0].id;
-      } else {
+      if (!contactId) {
+        console.log("Creating new contact for:", senderPhone);
         const createContactRes = await fetch(
           `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts`,
           {
@@ -68,33 +74,57 @@ async function handleRequest(request) {
             }),
           }
         );
+
         const createContactData = await createContactRes.json();
         contactId = createContactData?.payload?.contact?.id;
-      }
 
-      if (!contactId) {
-        return new Response('Unable to resolve contact', { status: 500 });
-      }
-
-      // 2. Look for an existing active conversation for this contact in the inbox
-      let conversationId = null;
-      const contactConvRes = await fetch(
-        `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/${contactId}/conversations`,
-        { headers }
-      );
-
-      if (contactConvRes.ok) {
-        const convList = await contactConvRes.json();
-        const openConv = convList?.payload?.find(
-          c => String(c.inbox_id) === String(CHATWOOT_INBOX_ID) && c.status !== 'resolved'
-        );
-        if (openConv) {
-          conversationId = openConv.id;
+        // If creation failed due to duplicate, fall back to contacts filter
+        if (!contactId && createContactRes.status === 422) {
+          console.log("Contact duplicate detected, falling back to filter lookup");
+          const filterRes = await fetch(
+            `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/filter`,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                payload: [{ attribute_key: 'phone_number', filter_operator: 'equal_to', values: [senderPhone] }]
+              }),
+            }
+          );
+          if (filterRes.ok) {
+            const filterData = await filterRes.json();
+            contactId = filterData?.payload?.[0]?.id;
+          }
         }
       }
 
-      // If no active thread exists, open a new conversation
+      if (!contactId) {
+        throw new Error(`Unable to resolve or create contact for ${senderPhone}`);
+      }
+
+      // 2. Find existing conversation or open a new one
+      let conversationId = null;
+      try {
+        const contactConvRes = await fetch(
+          `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/${contactId}/conversations`,
+          { headers }
+        );
+        if (contactConvRes.ok) {
+          const convList = await contactConvRes.json();
+          const openConv = convList?.payload?.find(
+            c => String(c.inbox_id) === String(CHATWOOT_INBOX_ID) && c.status !== 'resolved'
+          );
+          if (openConv) {
+            conversationId = openConv.id;
+            console.log("Found existing active conversation ID:", conversationId);
+          }
+        }
+      } catch (convLookupErr) {
+        console.warn("Could not retrieve existing conversations, creating fresh:", convLookupErr.message);
+      }
+
       if (!conversationId) {
+        console.log("Creating new conversation for contact ID:", contactId);
         const createConvRes = await fetch(
           `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations`,
           {
@@ -111,11 +141,12 @@ async function handleRequest(request) {
       }
 
       if (!conversationId) {
-        return new Response('Unable to resolve conversation', { status: 500 });
+        throw new Error(`Unable to resolve conversation for contact ${contactId}`);
       }
 
-      // 3. Post message to Chatwoot (Multipart for MMS, JSON for text)
+      // 3. Post message to conversation
       if (media.length > 0) {
+        console.log("Processing MMS attachment:", media[0].url);
         const mediaItem = media[0];
         const fileRes = await fetch(mediaItem.url);
         const fileBlob = await fileRes.blob();
@@ -126,7 +157,7 @@ async function handleRequest(request) {
         formData.append('private', 'false');
         formData.append('attachments[]', fileBlob, 'attachment');
 
-        await fetch(
+        const msgRes = await fetch(
           `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
           {
             method: 'POST',
@@ -136,8 +167,9 @@ async function handleRequest(request) {
             body: formData,
           }
         );
+        console.log("Chatwoot MMS post status:", msgRes.status);
       } else {
-        await fetch(
+        const msgRes = await fetch(
           `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${conversationId}/messages`,
           {
             method: 'POST',
@@ -149,10 +181,12 @@ async function handleRequest(request) {
             }),
           }
         );
+        console.log("Chatwoot SMS post status:", msgRes.status);
       }
 
       return new Response('Inbound processed', { status: 200 });
     } catch (err) {
+      console.error("Inbound handler failed:", err.message);
       return new Response(`Inbound error: ${err.message}`, { status: 500 });
     }
   }
