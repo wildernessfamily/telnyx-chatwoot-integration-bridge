@@ -4,14 +4,28 @@
  * http://creativecommons.org/licenses/by-nc-sa/4.0/
 */
 
+/**
+ * Welcome to Cloudflare Workers! This is your first worker.
+ *
+ * Run "npm run dev" in your terminal to start a development server
+ * Open a browser tab at http://localhost:8787/ to see your worker in action
+ * Run "npm run deploy" to publish your worker
+ *
+ * Learn more at https://developers.cloudflare.com/workers/
+ */
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
+/**
+ * Handles incoming webhooks from Telnyx and Chatwoot.
+ * @param {Request} request The incoming HTTP request.
+ * @returns {Response} The HTTP response acknowledging receipt or throwing an error.
+ */
 async function handleRequest(request) {
   const url = new URL(request.url);
 
-  // Read environment variables directly from global scope
+  // Load environment variables
   const TELNYX_API_KEY = globalThis.TELNYX_API_KEY;
   const CHATWOOT_API_TOKEN = globalThis.CHATWOOT_API_TOKEN;
   const CHATWOOT_BASE_URL = globalThis.CHATWOOT_BASE_URL;
@@ -20,13 +34,14 @@ async function handleRequest(request) {
   const TELNYX_PHONE_NUMBER = globalThis.TELNYX_PHONE_NUMBER;
 
   // ==========================================
-  // Endpoint A: Telnyx -> Chatwoot (Inbound SMS/MMS)
+  // Endpoint A: Telnyx to Chatwoot (Inbound SMS/MMS)
   // ==========================================
   if (url.pathname === '/webhooks/telnyx' && request.method === 'POST') {
     try {
       const body = await request.json();
       const eventType = body?.data?.event_type;
 
+      // Ignore all events except message.received
       if (eventType !== 'message.received') {
         return new Response('Event ignored', { status: 200 });
       }
@@ -36,6 +51,7 @@ async function handleRequest(request) {
       const messageText = payload?.text || '';
       const media = payload?.media || [];
 
+      // Validate we have a sender phone number
       if (!senderPhone) {
         return new Response('Missing sender phone', { status: 400 });
       }
@@ -61,17 +77,29 @@ async function handleRequest(request) {
         }
       }
 
+      // If no contact exists, create a new one
       if (!contactId) {
         console.log("Creating new contact for:", senderPhone);
+        
+        // Check if the number is standard E.164 or a short code
+        const isStandardPhone = senderPhone.startsWith('+');
+        const contactPayload = {
+          name: senderPhone,
+        };
+
+        // Assign to identifier instead of phone_number for short codes to bypass Chatwoot validation
+        if (isStandardPhone) {
+          contactPayload.phone_number = senderPhone;
+        } else {
+          contactPayload.identifier = senderPhone;
+        }
+
         const createContactRes = await fetch(
           `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts`,
           {
             method: 'POST',
             headers,
-            body: JSON.stringify({
-              name: senderPhone,
-              phone_number: senderPhone,
-            }),
+            body: JSON.stringify(contactPayload),
           }
         );
 
@@ -81,13 +109,17 @@ async function handleRequest(request) {
         // If creation failed due to duplicate, fall back to contacts filter
         if (!contactId && createContactRes.status === 422) {
           console.log("Contact duplicate detected, falling back to filter lookup");
+          
+          // Match the search attribute to the method used during creation
+          const searchAttribute = isStandardPhone ? 'phone_number' : 'identifier';
+          
           const filterRes = await fetch(
             `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/contacts/filter`,
             {
               method: 'POST',
               headers,
               body: JSON.stringify({
-                payload: [{ attribute_key: 'phone_number', filter_operator: 'equal_to', values: [senderPhone] }]
+                payload: [{ attribute_key: searchAttribute, filter_operator: 'equal_to', values: [senderPhone] }]
               }),
             }
           );
@@ -123,6 +155,7 @@ async function handleRequest(request) {
         console.warn("Could not retrieve existing conversations, creating fresh:", convLookupErr.message);
       }
 
+      // Create new conversation if no active conversation exists
       if (!conversationId) {
         console.log("Creating new conversation for contact ID:", contactId);
         const createConvRes = await fetch(
@@ -192,33 +225,33 @@ async function handleRequest(request) {
   }
 
   // ==========================================
-  // Endpoint B: Chatwoot -> Telnyx (Outbound SMS/MMS)
+  // Endpoint B: Chatwoot to Telnyx (Outbound SMS/MMS)
   // ==========================================
   if (url.pathname === '/webhooks/chatwoot' && request.method === 'POST') {
     try {
       const body = await request.json();
 
-      // Ignore typing indicators or non-message events
+      // Ignore typing indicators or non message webhook events
       if (body?.event && body.event !== 'message_created') {
-        return new Response('Ignored non-message event: ' + body.event, { status: 200 });
+        return new Response('Ignored non message event: ' + body.event, { status: 200 });
       }
 
-      // Skip internal staff notes and non-outgoing messages
+      // Ensure message is outgoing to the customer and not an internal private note
       const messageType = body?.message_type;
       const isPrivate = body?.private;
       if (messageType !== 'outgoing' || isPrivate === true) {
-        return new Response('Ignored non-outgoing or private message', { status: 200 });
+        return new Response('Ignored non outgoing or private message', { status: 200 });
       }
 
       const messageText = body?.content || body?.message?.content || '';
       const attachments = body?.attachments || body?.message?.attachments || [];
 
-      // Skip blank dispatches
+      // Avoid dispatching blank payloads
       if (!messageText && attachments.length === 0) {
         return new Response('Ignored empty message payload', { status: 200 });
       }
 
-      // Extract recipient phone number across payload variations
+      // Extract recipient phone number
       let recipientPhone =
         body?.conversation?.meta?.sender?.phone_number ||
         body?.conversation?.contact_inbox?.source_id ||
@@ -228,6 +261,7 @@ async function handleRequest(request) {
 
       const convId = body?.conversation?.id || body?.conversation_id;
 
+      // Make a secondary query if phone number is completely missing from payload
       if (!recipientPhone && convId) {
         const convDetailRes = await fetch(
           `${CHATWOOT_BASE_URL}/api/v1/accounts/${CHATWOOT_ACCOUNT_ID}/conversations/${convId}`,
@@ -261,6 +295,7 @@ async function handleRequest(request) {
         telnyxPayload.media_urls = attachments.map(a => a.data_url || a.thumb_url);
       }
 
+      // Dispatch outgoing message back to Telnyx
       const telnyxRes = await fetch('https://api.telnyx.com/v2/messages', {
         method: 'POST',
         headers: {
